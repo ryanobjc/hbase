@@ -30,6 +30,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -923,7 +925,8 @@ public class HFile {
      * @return Block wrapped in a ByteBuffer.
      * @throws IOException
      */
-    ByteBuffer readBlock(int block, boolean cacheBlock, final boolean pread)
+    ByteBuffer readBlock(int block, boolean cacheBlock, final boolean pread,
+                         Scanner scanner)
     throws IOException {
       if (blockIndex == null) {
         throw new IOException("Block index not loaded");
@@ -940,7 +943,7 @@ public class HFile {
         blockLoads++;
         // Check cache for block.  If found return.
         if (cache != null) {
-          ByteBuffer cachedBuf = cache.getBlock(name + block);
+          ByteBuffer cachedBuf = cache.getBlock(name + block, scanner);
           if (cachedBuf != null) {
             // Return a distinct 'copy' of the block, so pos doesnt get messed by
             // the scanner
@@ -973,8 +976,8 @@ public class HFile {
           throw new IOException("Data magic is bad in block " + block);
         }
         // Toss the header. May have to remove later due to performance.
-        buf.compact();
-        buf.limit(buf.limit() - DATABLOCKMAGIC.length);
+        buf = buf.slice();
+        //buf.limit(buf.limit() - DATABLOCKMAGIC.length);
         buf.rewind();
 
         readTime += System.currentTimeMillis() - now;
@@ -988,6 +991,20 @@ public class HFile {
         return buf;
       }
     }
+
+    /**
+     * Return a block to the cache (for those caches which explicitly track
+     * reference counting, instead of relying on GC).
+
+     * @param block block number
+     * @param scanner
+     */
+    private void returnBlock(int block, Scanner scanner) {
+      if (this.cache != null) {
+        cache.returnBlock(name + block, scanner);
+      }
+    }
+
 
     /*
      * Decompress <code>compressedSize</code> bytes off the backing
@@ -1014,8 +1031,13 @@ public class HFile {
           new BoundedRangeFileInputStream(this.istream, offset, compressedSize,
             pread),
           decompressor, 0);
-        buf = ByteBuffer.allocate(decompressedSize);
-        IOUtils.readFully(is, buf.array(), 0, buf.capacity());
+        if (cache == null) {
+          // Backup strategy.
+          buf = ByteBuffer.allocate(decompressedSize);
+        } else {
+          buf = cache.allocate(decompressedSize);
+        }
+        IOUtils.readFully(is, buf.array(), buf.arrayOffset(), decompressedSize);
         is.close();        
       } finally {
         if (null != decompressor) {
@@ -1089,7 +1111,8 @@ public class HFile {
     /*
      * Implementation of {@link HFileScanner} interface.
      */
-    private static class Scanner implements HFileScanner {
+    static class Scanner implements HFileScanner,
+    BlockCache.Scanner {
       private final Reader reader;
       private ByteBuffer block;
       private int currBlock;
@@ -1102,45 +1125,105 @@ public class HFile {
 
       public int blockFetches = 0;
 
+      // read/write lock for updating block.
+      private final ReentrantReadWriteLock blockLock =
+          new ReentrantReadWriteLock();
+      private final AtomicBoolean closed =
+          new AtomicBoolean(false);
+
+
       public Scanner(Reader r, boolean cacheBlocks, final boolean pread) {
         this.reader = r;
         this.cacheBlocks = cacheBlocks;
         this.pread = pread;
       }
+
+      public void provideNewBlock(ByteBuffer newBlock) {
+        blockLock.writeLock().lock();
+        try {
+          // TODO not sure this can happen...
+          if (closed.get()) return; // ignore new blocks if we are closed
+
+          block = newBlock;
+        } finally {
+          blockLock.writeLock().unlock();
+        }
+      }
+
+      public void close() {
+        blockLock.writeLock().lock();
+        try {
+          closed.set(true);
+
+        // tell the block cache we are finished with a block.
+          reader.returnBlock(currBlock, this);
+        } finally {
+          blockLock.writeLock().unlock();
+        }
+      }
       
       public KeyValue getKeyValue() {
+        blockLock.readLock().lock();
+        try {
         if(this.block == null) {
           return null;
         }
-        return new KeyValue(this.block.array(),
-            this.block.arrayOffset() + this.block.position() - 8);
+
+          // Be safe, don't mess with the position on block
+          ByteBuffer b = block.duplicate();
+          b.position( b.position() - 8 ); // rewind 8
+
+          // copy out (because we might be a direct byte buffer):
+          // space to put the data
+          byte [] kv = new byte[currKeyLen + currValueLen + 8];
+          b.get(kv);
+
+          return new KeyValue(kv);
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       public ByteBuffer getKey() {
+        blockLock.readLock().lock();
+        try {
         if (this.block == null || this.currKeyLen == 0) {
           throw new RuntimeException("you need to seekTo() before calling getKey()");
         }
-        ByteBuffer keyBuff = this.block.slice();
-        keyBuff.limit(this.currKeyLen);
-        keyBuff.rewind();
-        // Do keyBuff.asReadOnly()?
-        return keyBuff;
+          // we slice (could duplicate) so we dont change the position of the original buff
+        ByteBuffer b = this.block.duplicate();
+          byte [] key = new byte[this.currKeyLen];
+
+          b.get(key);
+
+          // toss keyBuff now.
+          return ByteBuffer.wrap(key);
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       public ByteBuffer getValue() {
+        blockLock.readLock().lock();
+        try {
         if (block == null || currKeyLen == 0) {
           throw new RuntimeException("you need to seekTo() before calling getValue()");
         }
-        // TODO: Could this be done with one ByteBuffer rather than create two?
-        ByteBuffer valueBuff = this.block.slice();
-        valueBuff.position(this.currKeyLen);
-        valueBuff = valueBuff.slice();
-        valueBuff.limit(currValueLen);
-        valueBuff.rewind();
-        return valueBuff;
+          ByteBuffer b = this.block.duplicate();
+          // go forward the key len:
+          b.position(b.position() + this.currKeyLen);
+          byte [] value = new byte[this.currValueLen];
+          b.get(value);
+
+          return ByteBuffer.wrap(value);
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       public boolean next() throws IOException {
+        blockLock.readLock().lock();
+        try {
         // LOG.deug("rem:" + block.remaining() + " p:" + block.position() +
         // " kl: " + currKeyLen + " kv: " + currValueLen);
         if (block == null) {
@@ -1156,7 +1239,7 @@ public class HFile {
             block = null;
             return false;
           }
-          block = reader.readBlock(this.currBlock, this.cacheBlocks, this.pread);
+          block = reader.readBlock(this.currBlock, this.cacheBlocks, this.pread, this);
           currKeyLen = block.getInt();
           currValueLen = block.getInt();
           blockFetches++;
@@ -1168,6 +1251,9 @@ public class HFile {
         currKeyLen = block.getInt();
         currValueLen = block.getInt();
         return true;
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
       
       public int seekTo(byte [] key) throws IOException {
@@ -1176,12 +1262,17 @@ public class HFile {
       
 
       public int seekTo(byte[] key, int offset, int length) throws IOException {
+        blockLock.readLock().lock();
+        try {
         int b = reader.blockContainingKey(key, offset, length);
         if (b < 0) return -1; // falls before the beginning of the file! :-(
         // Avoid re-reading the same block (that'd be dumb).
         loadBlock(b);
         
         return blockSeek(key, offset, length, false);
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       /**
@@ -1190,6 +1281,8 @@ public class HFile {
        * 
        * A note on the seekBefore - if you have seekBefore = true, AND the
        * first key in the block = key, then you'll get thrown exceptions.
+       *
+       * This needs to be holding the block read lock before calling.
        * @param key to find
        * @param seekBefore find the key before the exact match.
        * @return
@@ -1238,6 +1331,8 @@ public class HFile {
       
       public boolean seekBefore(byte[] key, int offset, int length)
       throws IOException {
+        blockLock.readLock().lock();
+        try {
         int b = reader.blockContainingKey(key, offset, length);
         if (b < 0)
           return false; // key is before the start of the file.
@@ -1257,27 +1352,47 @@ public class HFile {
         loadBlock(b);
         blockSeek(key, offset, length, true);
         return true;
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       public String getKeyString() {
+        blockLock.readLock().lock();
+        try {
         return Bytes.toStringBinary(block.array(), block.arrayOffset() +
           block.position(), currKeyLen);
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       public String getValueString() {
+        blockLock.readLock().lock();
+        try {
         return Bytes.toString(block.array(), block.arrayOffset() +
           block.position() + currKeyLen, currValueLen);
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       public Reader getReader() {
         return this.reader;
       }
 
-      public boolean isSeeked(){
+      public boolean isSeeked() {
+        blockLock.readLock().lock();
+        try {
         return this.block != null;
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
 
       public boolean seekTo() throws IOException {
+        blockLock.readLock().lock();
+        try {
         if (this.reader.blockIndex.isEmpty()) {
           return false;
         }
@@ -1288,21 +1403,29 @@ public class HFile {
           return true;
         }
         currBlock = 0;
-        block = reader.readBlock(this.currBlock, this.cacheBlocks, this.pread);
+        block = reader.readBlock(this.currBlock, this.cacheBlocks, this.pread, this);
         currKeyLen = block.getInt();
         currValueLen = block.getInt();
         blockFetches++;
         return true;
+        } finally {
+          blockLock.readLock().unlock();
+        }
       }
-      
+
+      /**
+       * You should already be holding the read lock already.
+       * @param bloc
+       * @throws IOException
+       */
       private void loadBlock(int bloc) throws IOException {
         if (block == null) {
-          block = reader.readBlock(bloc, this.cacheBlocks, this.pread);
+          block = reader.readBlock(bloc, this.cacheBlocks, this.pread, this);
           currBlock = bloc;
           blockFetches++;
         } else {
           if (bloc != currBlock) {
-            block = reader.readBlock(bloc, this.cacheBlocks, this.pread);
+            block = reader.readBlock(bloc, this.cacheBlocks, this.pread, this);
             currBlock = bloc;
             blockFetches++;
           } else {

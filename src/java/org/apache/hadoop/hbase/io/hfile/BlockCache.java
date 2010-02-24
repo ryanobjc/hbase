@@ -27,6 +27,17 @@ import java.nio.ByteBuffer;
  */
 public interface BlockCache {
   /**
+   * The block cache needs references to the block
+   * cache so it can do some buffer movements.
+   *
+   * The implementer should ensure this change is atomic
+   * (perhaps using a ReentrantReadWriteLock).
+   */
+  public interface Scanner {
+    public void provideNewBlock(ByteBuffer newBlock);
+  }
+
+  /**
    * Add block to cache.
    * @param blockName Zero-based file block number.
    * @param buf The block contents wrapped in a ByteBuffer.
@@ -46,7 +57,26 @@ public interface BlockCache {
    * @param blockName Block number to fetch.
    * @return Block or null if block is not in the cache.
    */
-  public ByteBuffer getBlock(String blockName);
+  public ByteBuffer getBlock(String blockName,
+                             Scanner scanner);
+
+  /**
+   * Return a block when you are done with it.
+   *
+   * @param blockName the block you are finished with
+   * @param scanner the scanner for whence you are finished
+   */
+  public void returnBlock(String blockName,
+                          Scanner scanner);
+
+  /**
+   * Allocate a block buffer, this is an allocation hook for those
+   * caches that do a more sophisticated allocation strategy that may not
+   * use 'new'.
+   * @param size block size
+   * @return block
+   */
+  public ByteBuffer allocate(int size);
 
   /**
    * Shutdown the cache.

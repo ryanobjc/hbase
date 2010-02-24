@@ -79,7 +79,7 @@ class StoreFileScanner implements KeyValueScanner {
   }
   
   public void close() {
-    // Nothing to close on HFileScanner?
+    hfs.close();
     cur = null;
   }
   
