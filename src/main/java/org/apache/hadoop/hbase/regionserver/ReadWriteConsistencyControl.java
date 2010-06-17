@@ -53,6 +53,9 @@ public class ReadWriteConsistencyControl {
     perThreadReadPoint.set(rwcc.memstoreReadPoint());
     return getThreadReadPoint();
   }
+  public static void resetThreadReadPoint() {
+    perThreadReadPoint.set(0L);
+  }
 
   public WriteEntry beginMemstoreInsert() {
     synchronized (writeQueue) {

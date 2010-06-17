@@ -150,7 +150,7 @@ public class TestStore extends TestCase {
     long seqid = f.getMaxSequenceId();
     Configuration c = HBaseConfiguration.create();
     FileSystem fs = FileSystem.get(c);
-    StoreFile.Writer w = StoreFile.createWriter(fs, storedir, 
+    StoreFile.Writer w = StoreFile.createWriter(fs, storedir,
         StoreFile.DEFAULT_BLOCKSIZE_SMALL);
     w.appendMetadata(seqid + 1, false);
     w.close();
@@ -161,7 +161,10 @@ public class TestStore extends TestCase {
       this.store.getFamily(), fs, c);
     System.out.println(this.store.getHRegionInfo().getEncodedName());
     assertEquals(2, this.store.getStorefilesCount());
-    this.store.get(get, qualifiers, result);
+
+    result = HBaseTestingUtility.getFromStoreFile(store,
+        get.getRow(),
+        qualifiers);
     assertEquals(1, result.size());
   }
 
@@ -181,7 +184,8 @@ public class TestStore extends TestCase {
     this.store.add(new KeyValue(row, family, qf6, null));
 
     //Get
-    this.store.get(get, qualifiers, result);
+    result = HBaseTestingUtility.getFromStoreFile(store,
+        get.getRow(), qualifiers);
 
     //Compare
     assertCheck();
@@ -213,7 +217,10 @@ public class TestStore extends TestCase {
     flush(3);
 
     //Get
-    this.store.get(get, qualifiers, result);
+    result = HBaseTestingUtility.getFromStoreFile(store,
+        get.getRow(),
+        qualifiers);
+    //this.store.get(get, qualifiers, result);
 
     //Need to sort the result since multiple files
     Collections.sort(result, KeyValue.COMPARATOR);
@@ -246,7 +253,8 @@ public class TestStore extends TestCase {
     this.store.add(new KeyValue(row, family, qf6, null));
 
     //Get
-    this.store.get(get, qualifiers, result);
+    result = HBaseTestingUtility.getFromStoreFile(store,
+        get.getRow(), qualifiers);
 
     //Need to sort the result since multiple files
     Collections.sort(result, KeyValue.COMPARATOR);
@@ -314,7 +322,7 @@ public class TestStore extends TestCase {
     NavigableSet<byte[]> cols = new TreeSet<byte[]>();
     cols.add(qf1);
 
-    this.store.get(get, cols, results);
+    results = HBaseTestingUtility.getFromStoreFile(store, get);
     assertEquals(2, results.size());
 
     long ts1 = results.get(0).getTimestamp();
