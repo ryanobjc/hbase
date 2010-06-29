@@ -518,7 +518,7 @@ public class HBaseTestingUtility {
     results.close();
     return digest.toString();
   }
-  
+
   /**
    * Creates many regions names "aaa" to "zzz".
    *
@@ -556,7 +556,7 @@ public class HBaseTestingUtility {
     };
     return createMultiRegions(c, table, columnFamily, KEYS);
   }
-  
+
   public int createMultiRegions(final Configuration c, final HTable table,
       final byte[] columnFamily, byte [][] startKeys)
   throws IOException {
@@ -614,7 +614,7 @@ public class HBaseTestingUtility {
     s.close();
     return rows;
   }
-  
+
   /**
    * Returns all rows from the .META. table for a given user table
    *
@@ -818,7 +818,7 @@ public class HBaseTestingUtility {
   }
 
   public void cleanupTestDir() throws IOException {
-    getTestDir().getFileSystem(conf).delete(getTestDir(), true);    
+    getTestDir().getFileSystem(conf).delete(getTestDir(), true);
   }
 
   public void waitTableAvailable(byte[] table, long timeoutMillis)
@@ -878,16 +878,16 @@ public class HBaseTestingUtility {
    * You'll get a NPE if you call before you've started a minidfscluster.
    * @param soft Soft limit
    * @param hard Hard limit
-   * @throws NoSuchFieldException 
-   * @throws SecurityException 
-   * @throws IllegalAccessException 
-   * @throws IllegalArgumentException 
+   * @throws NoSuchFieldException
+   * @throws SecurityException
+   * @throws IllegalAccessException
+   * @throws IllegalArgumentException
    */
   public void setNameNodeNameSystemLeasePeriod(final int soft, final int hard)
   throws SecurityException, NoSuchFieldException, IllegalArgumentException, IllegalAccessException {
     // TODO: If 0.20 hadoop do one thing, if 0.21 hadoop do another.
     // Not available in 0.20 hdfs.  Use reflection to make it happen.
-    
+
     // private NameNode nameNode;
     Field field = this.dfsCluster.getClass().getDeclaredField("nameNode");
     field.setAccessible(true);
@@ -903,10 +903,10 @@ public class HBaseTestingUtility {
    * </pre>
    * @param stream A DFSClient.DFSOutputStream.
    * @param max
-   * @throws NoSuchFieldException 
-   * @throws SecurityException 
-   * @throws IllegalAccessException 
-   * @throws IllegalArgumentException 
+   * @throws NoSuchFieldException
+   * @throws SecurityException
+   * @throws IllegalAccessException
+   * @throws IllegalArgumentException
    */
   public static void setMaxRecoveryErrorCount(final OutputStream stream,
       final int max) {
@@ -956,10 +956,10 @@ public class HBaseTestingUtility {
       // If I get to here and all rows have a Server, then all have been assigned.
       if (rows == countOfRegions) break;
       LOG.info("Found=" + rows);
-      Threads.sleep(1000); 
+      Threads.sleep(1000);
     }
   }
-}
+
   public static List<KeyValue> getFromStoreFile(Store store,
                                                 Get get) throws IOException {
     ReadWriteConsistencyControl.resetThreadReadPoint();
