@@ -66,12 +66,21 @@ public class SimpleBlockCache implements BlockCache {
     return cache.size();
   }
 
-  public synchronized ByteBuffer getBlock(String blockName) {
+  public synchronized ByteBuffer getBlock(String blockName, Scanner scanner) {
     processQueue(); // clear out some crap.
     Ref ref = cache.get(blockName);
     if (ref == null)
       return null;
     return ref.get();
+  }
+
+  public void returnBlock(String blockName, Scanner scanner) {
+    // noop
+  }
+
+  @Override
+  public ByteBuffer allocate(int size) {
+    return ByteBuffer.allocate(size);
   }
 
   public synchronized void cacheBlock(String blockName, ByteBuffer buf) {

@@ -24,7 +24,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.KVComparator;
 import org.apache.hadoop.hbase.io.HalfStoreFileReader;
@@ -858,6 +857,7 @@ public class StoreFile {
       }
 
       try {
+        // TODO DO SOMETHING SMART HERE!!
         ByteBuffer bloom = reader.getMetaBlock(BLOOM_FILTER_DATA_KEY, true);
         if (bloom != null) {
           return this.bloomFilter.contains(key, bloom);
@@ -891,6 +891,7 @@ public class StoreFile {
       }
 
       try {
+        // TODO DO SOMETHING SMART HERE!
         ByteBuffer b = reader.getMetaBlock(BLOOM_FILTER_META_KEY, false);
         if (b != null) {
           if (bloomFilterType == BloomType.NONE) {
@@ -916,8 +917,10 @@ public class StoreFile {
           : reader.getFilterEntries();
     }
 
+    // TODO make this method private or otherwise obscure it?
     public ByteBuffer getMetaBlock(String bloomFilterDataKey, boolean cacheBlock) throws IOException {
-      return reader.getMetaBlock(bloomFilterDataKey, cacheBlock);
+      // TODO DO SOMETHING SMART HERE DAMNIT!
+      return reader.getMetaBlock(bloomFilterDataKey, true);
     }
 
     public void setBloomFilterFaulty() {

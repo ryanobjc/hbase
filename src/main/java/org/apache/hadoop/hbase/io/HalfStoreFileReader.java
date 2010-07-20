@@ -208,6 +208,9 @@ public class HalfStoreFileReader extends StoreFile.Reader {
       public boolean isSeeked() {
         return this.delegate.isSeeked();
       }
+      public void close() {
+        this.delegate.close();
+      }
     };
   }
 
