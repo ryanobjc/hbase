@@ -279,7 +279,7 @@ public class LruBlockCache implements BlockCache, HeapSize {
    * @param blockName block name
    * @return buffer of specified block name, or null if not in cache
    */
-  public ByteBuffer getBlock(String blockName) {
+  public ByteBuffer getBlock(String blockName, Scanner scanner) {
     CachedBlock cb = map.get(blockName);
     if(cb == null) {
       stats.miss();
@@ -288,6 +288,14 @@ public class LruBlockCache implements BlockCache, HeapSize {
     stats.hit();
     cb.access(count.incrementAndGet());
     return cb.getBuffer();
+  }
+
+  public ByteBuffer allocate(int size) {
+    return ByteBuffer.allocate(size);
+  }
+
+  public void returnBlock(String blockName, Scanner scanner) {
+    // noop.
   }
 
   protected long evictBlock(CachedBlock block) {

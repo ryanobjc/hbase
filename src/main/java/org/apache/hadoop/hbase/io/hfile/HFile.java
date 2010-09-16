@@ -30,6 +30,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedSet;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -755,7 +758,7 @@ public class HFile {
      */
     public Reader(final FSDataInputStream fsdis, final long size,
         final BlockCache cache, final boolean inMemory) {
-      this.cache = cache;
+      this.cache = cache == null ? new NullCache() : cache;
       this.fileSize = size;
       this.istream = fsdis;
       this.closeIStream = false;
@@ -890,11 +893,11 @@ public class HFile {
     }
     /**
      * @param metaBlockName
-     * @param cacheBlock Add block to cache, if found
+     * @param cacheBlock
      * @return Block wrapped in a ByteBuffer
      * @throws IOException
      */
-    public ByteBuffer getMetaBlock(String metaBlockName, boolean cacheBlock)
+    public BlockCache.BufferAndRef getMetaBlock(String metaBlockName, boolean cacheBlock)
     throws IOException {
       if (trailer.metaIndexCount == 0) {
         return null; // there are no meta blocks
@@ -920,39 +923,59 @@ public class HFile {
       synchronized (metaIndex.blockKeys[block]) {
         metaLoads++;
         // Check cache for block.  If found return.
-        if (cache != null) {
-          ByteBuffer cachedBuf = cache.getBlock(name + "meta" + block);
-          if (cachedBuf != null) {
-            // Return a distinct 'shallow copy' of the block,
-            // so pos doesnt get messed by the scanner
-            cacheHits++;
-            return cachedBuf.duplicate();
+        BlockCache.BufferAndRef cachedBuf = cache.getBlock(name + "meta" + block);
+        if (cachedBuf != null) {
+          // Return a distinct 'shallow copy' of the block,
+          // so pos doesnt get messed by the scanner
+          cacheHits++;
+          return cachedBuf;
+        }
+
+        BlockCache.BufferAndRef buf;
+        final int blockDataSize = metaIndex.blockDataSizes[block];
+        if (cacheBlock) {
+          // Ask the block cache for a new buffer for this block name.
+          buf = cache.allocate(blockDataSize);
+        } else {
+          buf = new BlockCache.BufferAndRef(ByteBuffer.allocate(blockDataSize),
+              null);
+        }
+
+        boolean success = false;
+        try {
+          decompress(metaIndex.blockOffsets[block],
+              longToInt(blockSize), blockDataSize, true,
+              buf.buffer);
+          byte [] magic = new byte[METABLOCKMAGIC.length];
+          buf.buffer.get(magic, 0, magic.length);
+
+          if (! Arrays.equals(magic, METABLOCKMAGIC)) {
+            throw new IOException("Meta magic is bad in block " + block);
           }
-          // Cache Miss, please load.
+
+          // Create a new ByteBuffer 'shallow copy' to hide the magic header
+          ByteBuffer newBuf = buf.buffer.slice();
+
+          readTime += System.currentTimeMillis() - now;
+          readOps++;
+
+          if (cacheBlock) {
+            buf = cache.cacheBlock(buf.ref, newBuf, name + "meta" + block, inMemory );
+          } // else noop
+
+          success = true;
+
+          return buf;
+        } finally {
+          if (!success && cacheBlock) {
+            cache.abortAllocation(buf);
+          }
         }
-
-        ByteBuffer buf = decompress(metaIndex.blockOffsets[block],
-          longToInt(blockSize), metaIndex.blockDataSizes[block], true);
-        byte [] magic = new byte[METABLOCKMAGIC.length];
-        buf.get(magic, 0, magic.length);
-
-        if (! Arrays.equals(magic, METABLOCKMAGIC)) {
-          throw new IOException("Meta magic is bad in block " + block);
-        }
-
-        // Create a new ByteBuffer 'shallow copy' to hide the magic header
-        buf = buf.slice();
-
-        readTime += System.currentTimeMillis() - now;
-        readOps++;
-
-        // Cache the block
-        if(cacheBlock && cache != null) {
-          cache.cacheBlock(name + "meta" + block, buf.duplicate(), inMemory);
-        }
-
-        return buf;
       }
+    }
+
+    void releaseBlock(BlockCache.BufferAndRef ref) {
+      cache.release(ref);
     }
 
     /**
@@ -963,7 +986,7 @@ public class HFile {
      * @return Block wrapped in a ByteBuffer.
      * @throws IOException
      */
-    ByteBuffer readBlock(int block, boolean cacheBlock, final boolean pread)
+    BlockCache.BufferAndRef readBlock(int block, boolean cacheBlock, final boolean pread)
     throws IOException {
       if (blockIndex == null) {
         throw new IOException("Block index not loaded");
@@ -979,14 +1002,12 @@ public class HFile {
       synchronized (blockIndex.blockKeys[block]) {
         blockLoads++;
         // Check cache for block.  If found return.
-        if (cache != null) {
-          ByteBuffer cachedBuf = cache.getBlock(name + block);
-          if (cachedBuf != null) {
-            // Return a distinct 'shallow copy' of the block,
-            // so pos doesnt get messed by the scanner
-            cacheHits++;
-            return cachedBuf.duplicate();
-          }
+        BlockCache.BufferAndRef cachedBuf = cache.getBlock(name + block);
+        if (cachedBuf != null) {
+          // Return a distinct 'shallow copy' of the block,
+          // so pos doesnt get messed by the scanner
+          cacheHits++;
+          return cachedBuf;
           // Carry on, please load.
         }
 
@@ -1003,30 +1024,48 @@ public class HFile {
           onDiskBlockSize = blockIndex.blockOffsets[block+1] -
           blockIndex.blockOffsets[block];
         }
-        ByteBuffer buf = decompress(blockIndex.blockOffsets[block],
-          longToInt(onDiskBlockSize), this.blockIndex.blockDataSizes[block],
-          pread);
 
-        byte [] magic = new byte[DATABLOCKMAGIC.length];
-        buf.get(magic, 0, magic.length);
-        if (!Arrays.equals(magic, DATABLOCKMAGIC)) {
-          throw new IOException("Data magic is bad in block " + block);
+        BlockCache.BufferAndRef buf;
+        final int blockDataSize = this.blockIndex.blockDataSizes[block];
+        if (cacheBlock) {
+          // Ask the block cache for a new buffer for this block name.
+          buf = cache.allocate(blockDataSize);
+        } else {
+          buf = new BlockCache.BufferAndRef(ByteBuffer.allocate(blockDataSize),
+              null);
         }
 
-        // 'shallow copy' to hide the header
-        // NOTE: you WILL GET BIT if you call buf.array() but don't start
-        //       reading at buf.arrayOffset()
-        buf = buf.slice();
+        boolean success = false;
+        try {
+          decompress(blockIndex.blockOffsets[block],
+              longToInt(onDiskBlockSize), blockDataSize,
+              pread, buf.buffer);
 
-        readTime += System.currentTimeMillis() - now;
-        readOps++;
+          byte [] magic = new byte[DATABLOCKMAGIC.length];
+          buf.buffer.get(magic, 0, magic.length);
+          if (!Arrays.equals(magic, DATABLOCKMAGIC)) {
+            throw new IOException("Data magic is bad in block " + block);
+          }
 
-        // Cache the block
-        if(cacheBlock && cache != null) {
-          cache.cacheBlock(name + block, buf.duplicate(), inMemory);
+          // slice a new buffer for the cache to hand out.
+          ByteBuffer newBuf = buf.buffer.slice();
+
+          readTime += System.currentTimeMillis() - now;
+          readOps++;
+
+          if (cacheBlock) {
+            // stuff the block back in:
+            buf = cache.cacheBlock(buf.ref, newBuf, name + block, inMemory);
+          } // else noop
+
+          success = true;
+
+          return buf;
+        } finally {
+          if (!success && cacheBlock) {
+            cache.abortAllocation(buf);
+          }
         }
-
-        return buf;
       }
     }
 
@@ -1036,15 +1075,16 @@ public class HFile {
      * @param offset
      * @param compressedSize
      * @param decompressedSize
+     * @param block the block to decompress to
      *
      * @return
      * @throws IOException
      */
-    private ByteBuffer decompress(final long offset, final int compressedSize,
-      final int decompressedSize, final boolean pread)
+    private void decompress(final long offset, final int compressedSize,
+      final int decompressedSize, final boolean pread,
+      ByteBuffer block)
     throws IOException {
       Decompressor decompressor = null;
-      ByteBuffer buf = null;
       try {
         decompressor = this.compressAlgo.getDecompressor();
         // My guess is that the bounded range fis is needed to stop the
@@ -1054,16 +1094,18 @@ public class HFile {
         InputStream is = this.compressAlgo.createDecompressionStream(
           new BoundedRangeFileInputStream(this.istream, offset, compressedSize,
             pread),
-          decompressor, 0);
-        buf = ByteBuffer.allocate(decompressedSize);
-        IOUtils.readFully(is, buf.array(), 0, buf.capacity());
+            decompressor, 0);
+
+        // read jazz.
+
+        // TODO replace this IOUtils readFully with something that is DirectByteBuffer compatible!
+        IOUtils.readFully(is, block.array(), 0, decompressedSize);
         is.close();
       } finally {
         if (null != decompressor) {
           this.compressAlgo.returnDecompressor(decompressor);
         }
       }
-      return buf;
     }
 
     /**
@@ -1172,7 +1214,8 @@ public class HFile {
      */
     protected static class Scanner implements HFileScanner {
       private final Reader reader;
-      private ByteBuffer block;
+      private BlockCache.BufferAndRef ref;
+      private ByteBuffer block; // unwrapped for ease of use
       private int currBlock;
 
       private final boolean cacheBlocks;
@@ -1183,46 +1226,74 @@ public class HFile {
 
       public int blockFetches = 0;
 
+      private boolean closed = false;
+
       public Scanner(Reader r, boolean cacheBlocks, final boolean pread) {
         this.reader = r;
         this.cacheBlocks = cacheBlocks;
         this.pread = pread;
       }
 
-      public KeyValue getKeyValue() {
+
+      public synchronized void close() {
+        if (closed) return;
+
+        closed = true;
+        reader.releaseBlock(ref);
+
+        // set some time bombs. :-)
+        block = null;
+        ref = null;
+      }
+
+
+      public synchronized KeyValue getKeyValue() {
         if(this.block == null) {
           return null;
         }
-        return new KeyValue(this.block.array(),
-            this.block.arrayOffset() + this.block.position() - 8,
-            this.currKeyLen+this.currValueLen+8);
+
+        // Be safe, don't mess with the position on block
+        ByteBuffer b = block.duplicate();
+        b.position( b.position() - 8 ); // rewind 8
+
+        // copy out (because we might be a direct byte buffer):
+        // space to put the data
+        byte [] kv = new byte[currKeyLen + currValueLen + 8];
+        b.get(kv);
+
+        return new KeyValue(kv);
       }
 
-      public ByteBuffer getKey() {
+      public synchronized ByteBuffer getKey() {
         if (this.block == null || this.currKeyLen == 0) {
           throw new RuntimeException("you need to seekTo() before calling getKey()");
         }
-        ByteBuffer keyBuff = this.block.slice();
-        keyBuff.limit(this.currKeyLen);
-        keyBuff.rewind();
-        // Do keyBuff.asReadOnly()?
-        return keyBuff;
+
+        // we slice (could duplicate) so we dont change the position of the original buff
+        ByteBuffer b = this.block.duplicate();
+        byte [] key = new byte[this.currKeyLen];
+
+        b.get(key);
+
+        // toss keyBuff now.
+        return ByteBuffer.wrap(key);
       }
 
-      public ByteBuffer getValue() {
+      public synchronized ByteBuffer getValue() {
         if (block == null || currKeyLen == 0) {
           throw new RuntimeException("you need to seekTo() before calling getValue()");
         }
-        // TODO: Could this be done with one ByteBuffer rather than create two?
-        ByteBuffer valueBuff = this.block.slice();
-        valueBuff.position(this.currKeyLen);
-        valueBuff = valueBuff.slice();
-        valueBuff.limit(currValueLen);
-        valueBuff.rewind();
-        return valueBuff;
+        ByteBuffer b = this.block.duplicate();
+        // go forward the key len:
+        b.position(b.position() + this.currKeyLen);
+        byte [] value = new byte[this.currValueLen];
+        b.get(value);
+
+        return ByteBuffer.wrap(value);
       }
 
-      public boolean next() throws IOException {
+      public synchronized boolean next() throws IOException {
+
         // LOG.deug("rem:" + block.remaining() + " p:" + block.position() +
         // " kl: " + currKeyLen + " kv: " + currValueLen);
         if (block == null) {
@@ -1231,17 +1302,21 @@ public class HFile {
         block.position(block.position() + currKeyLen + currValueLen);
         if (block.remaining() <= 0) {
           // LOG.debug("Fetch next block");
-          currBlock++;
-          if (currBlock >= reader.blockIndex.count) {
-            // damn we are at the end
+
+          int nextblock = currBlock + 1;
+          if (nextblock >= reader.blockIndex.count) {
+            // HACK, why do we have this random call here?
+            reader.releaseBlock(ref);
             currBlock = 0;
             block = null;
             return false;
           }
-          block = reader.readBlock(this.currBlock, this.cacheBlocks, this.pread);
-          currKeyLen = Bytes.toInt(block.array(), block.arrayOffset()+block.position(), 4);
-          currValueLen = Bytes.toInt(block.array(), block.arrayOffset()+block.position()+4, 4);
-          block.position(block.position()+8);
+
+          loadBlock(nextblock);
+
+          // The block has been loaded. Continue.
+          currKeyLen = block.getInt();
+          currValueLen = block.getInt();
           blockFetches++;
           return true;
         }
@@ -1257,13 +1332,12 @@ public class HFile {
         return seekTo(key, 0, key.length);
       }
 
-      public int seekTo(byte[] key, int offset, int length) throws IOException {
+
+      public synchronized int seekTo(byte[] key, int offset, int length) throws IOException {
         int b = reader.blockContainingKey(key, offset, length);
         if (b < 0) return -1; // falls before the beginning of the file! :-(
-        // Avoid re-reading the same block (that'd be dumb).
+
         loadBlock(b, true);
-        return blockSeek(key, offset, length, false);
-      }
 
       public int reseekTo(byte [] key) throws IOException {
         return reseekTo(key, 0, key.length);
@@ -1297,6 +1371,8 @@ public class HFile {
        *
        * A note on the seekBefore - if you have seekBefore = true, AND the
        * first key in the block = key, then you'll get thrown exceptions.
+       *
+       * This needs to be holding the block read lock before calling.
        * @param key to find
        * @param seekBefore find the key before the exact match.
        * @return
@@ -1308,7 +1384,7 @@ public class HFile {
           klen = block.getInt();
           vlen = block.getInt();
           int comp = this.reader.comparator.compare(key, offset, length,
-            block.array(), block.arrayOffset() + block.position(), klen);
+              block.array(), block.arrayOffset() + block.position(), klen);
           if (comp == 0) {
             if (seekBefore) {
               block.position(block.position() - lastLen - 16);
@@ -1343,8 +1419,8 @@ public class HFile {
         return seekBefore(key, 0, key.length);
       }
 
-      public boolean seekBefore(byte[] key, int offset, int length)
-      throws IOException {
+      public synchronized boolean seekBefore(byte[] key, int offset, int length)
+          throws IOException {
         int b = reader.blockContainingKey(key, offset, length);
         if (b < 0)
           return false; // key is before the start of the file.
@@ -1366,61 +1442,67 @@ public class HFile {
         return true;
       }
 
-      public String getKeyString() {
+      public synchronized String getKeyString() {
         return Bytes.toStringBinary(block.array(), block.arrayOffset() +
-          block.position(), currKeyLen);
+            block.position(), currKeyLen);
       }
 
-      public String getValueString() {
+      public synchronized String getValueString() {
         return Bytes.toString(block.array(), block.arrayOffset() +
-          block.position() + currKeyLen, currValueLen);
+            block.position() + currKeyLen, currValueLen);
       }
 
       public Reader getReader() {
         return this.reader;
       }
 
-      public boolean isSeeked(){
+      public synchronized boolean isSeeked() {
         return this.block != null;
       }
 
-      public boolean seekTo() throws IOException {
+      public synchronized boolean seekTo() throws IOException {
         if (this.reader.blockIndex.isEmpty()) {
           return false;
         }
-        if (block != null && currBlock == 0) {
-          block.rewind();
-          currKeyLen = block.getInt();
-          currValueLen = block.getInt();
-          return true;
-        }
-        currBlock = 0;
-        block = reader.readBlock(this.currBlock, this.cacheBlocks, this.pread);
+        loadBlock(0);
         currKeyLen = block.getInt();
         currValueLen = block.getInt();
-        blockFetches++;
         return true;
       }
 
-      private void loadBlock(int bloc, boolean rewind) throws IOException {
+      /**
+       * Load block will ensure we don't over-read (eg: by rewinding the
+       * current block) and will also release block resources if necessary.
+       * You should already be holding the read lock already.
+       * @param blockToLoad block id to load
+       * @throws IOException
+       */
+      private void loadBlock(int blockToLoad, boolean rewind) throws IOException {
         if (block == null) {
-          block = reader.readBlock(bloc, this.cacheBlocks, this.pread);
-          currBlock = bloc;
+          // Load a block there was no previous block
+
+          ref = reader.readBlock(blockToLoad, this.cacheBlocks, this.pread);
+          block = ref.buffer;
+          currBlock = blockToLoad;
+          blockFetches++;
+          return;
+        }
+
+        if (blockToLoad != currBlock) {
+          reader.releaseBlock(ref);
+
+          ref = reader.readBlock(blockToLoad, this.cacheBlocks, this.pread);
+          block = ref.buffer;
+          currBlock = blockToLoad;
           blockFetches++;
         } else {
-          if (bloc != currBlock) {
-            block = reader.readBlock(bloc, this.cacheBlocks, this.pread);
-            currBlock = bloc;
-            blockFetches++;
+          // Avoid re-reading the same block (that'd be dumb).
+          // we are already in the same block, just rewind to seek again.
+	      if (rewind) {
+            block.rewind();
           } else {
-            // we are already in the same block, just rewind to seek again.
-            if (rewind) {
-              block.rewind();
-            }
-            else {
-              //Go back by (size of rowlength + size of valuelength) = 8 bytes
-              block.position(block.position()-8);
-            }
+            //Go back by (size of rowlength + size of valuelength) = 8 bytes
+            block.position(block.position()-8);
           }
         }
       }
@@ -1429,7 +1511,7 @@ public class HFile {
       public String toString() {
         return "HFileScanner for reader " + String.valueOf(reader);
       }
-    }
+    } // END OF SCANNER
 
     public String getTrailerInfo() {
       return trailer.toString();

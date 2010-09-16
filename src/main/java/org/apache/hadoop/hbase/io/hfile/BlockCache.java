@@ -27,27 +27,77 @@ import java.nio.ByteBuffer;
  */
 public interface BlockCache {
   /**
-   * Add block to cache.
-   * @param blockName Zero-based file block number.
-   * @param buf The block contents wrapped in a ByteBuffer.
-   * @param inMemory Whether block should be treated as in-memory
+   * The block cache needs references to the block
+   * cache so it can do some buffer movements.
+   *
+   * The implementer should ensure this change is atomic
+   * (perhaps using a ReentrantReadWriteLock).
    */
-  public void cacheBlock(String blockName, ByteBuffer buf, boolean inMemory);
+  public interface Scanner {
+    public void provideNewBlock(ByteBuffer newBlock);
+  }
 
   /**
-   * Add block to cache (defaults to not in-memory).
+   * Add block to cache.
    * @param blockName Zero-based file block number.
-   * @param buf The block contents wrapped in a ByteBuffer.
+   * @param ref the reference from allocate(int)
+   * @param block the block (that should be a subview of the prev block)
+   * @param inMemory Whether block should be treated as in-memory
    */
-  public void cacheBlock(String blockName, ByteBuffer buf);
+  public BufferAndRef cacheBlock(Object ref,
+                                 ByteBuffer block,
+                                 String blockName,
+                                 boolean inMemory);
 
   /**
    * Fetch block from cache.
+   *
+   * The block has been ref()ed for you. You will need to
+   * deref() it later using the ref returned.
+   *
    * @param blockName Block number to fetch.
    * @return Block or null if block is not in the cache.
    */
-  public ByteBuffer getBlock(String blockName);
+  public BufferAndRef getBlock(String blockName);
 
+  /**
+   * Mark this block reference as 'no longer used'. You must not retain pointers
+   * to this block/buffer!!!
+   *
+   * @param ref the buffer and reference
+   * @return
+   */
+  public int release(BufferAndRef ref);
+
+  /**
+   * Allocate a block buffer, this is an allocation hook for those
+   * caches that do a more sophisticated allocation strategy that may not
+   * use 'new'.
+   *
+   * @param size block size
+   * @return buffer for block and reference handle
+   */
+  public BufferAndRef allocate(int size);
+
+  /**
+   * Abort an allocation.
+   * @param block the previous allocated block.
+   */
+  public void abortAllocation(BufferAndRef block);
+
+  /**
+   * A type to encapsulate a ByteBuffer and the Cache reference (for deallocation, see above)
+   * pointer.  Caches should ignore releases that have a null ref.
+   */
+  public static class BufferAndRef  {
+    public final ByteBuffer buffer;
+    public final Object ref;
+    public BufferAndRef(ByteBuffer buf, Object ref) {
+      this.buffer = buf;
+      this.ref = ref;
+    }
+  }
+  
   /**
    * Shutdown the cache.
    */

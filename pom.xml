@@ -197,6 +197,14 @@
       </releases>
     </repository>
     <repository>
+      <id>cloudera-releases</id>
+      <name>Cloudera Release Repository</name>
+      <url>https://repository.cloudera.com/content/repositories/releases/</url>
+        <releases>
+          <enabled>true</enabled>
+        </releases>
+    </repository>
+    <repository>
       <id>ibiblio.org</id>
       <name>ibiblio mirror</name>
       <url>http://mirrors.ibiblio.org/pub/mirrors/maven2/</url>

@@ -143,4 +143,9 @@ public interface HFileScanner {
    * Otherwise returns false.
    */
   public boolean isSeeked();
+
+  /**
+   * Dispose of this scanner, release the block cache segment.
+   */
+  void close();
 }
